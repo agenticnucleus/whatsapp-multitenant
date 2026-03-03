@@ -48,9 +48,19 @@ npm install
 npm run dev
 ```
 
-## 📄 License
+## 🤝 Contributing
 
-This project is licensed under the [MIT License](LICENSE).
+We love community contributions! If you want to contribute, please check our [Contributing Guide](CONTRIBUTING.md) and use our [PR Template](.github/PULL_REQUEST_TEMPLATE.md).
+
+1. Fork the project.
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`).
+4. Push to the Branch (`git push origin feature/AmazingFeature`).
+5. Open a Pull Request.
+
+## ⚖️ License
+
+Distributed under the MIT License. See `LICENSE` for more information.
 
 ---
 
