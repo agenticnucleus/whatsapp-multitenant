@@ -22,6 +22,3 @@ tmp/
 .DS_Store
 Thumbs.db
 
-# NPM
-package-lock.json
-pnpm-lock.yaml
