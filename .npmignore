@@ -1,0 +1,14 @@
+node_modules
+dist
+.env
+tmp
+qr_codes
+*.log
+.DS_Store
+tsconfig.json
+nodemon.json
+pnpm-lock.yaml
+package-lock.json
+src
+docker-compose.yml
+Dockerfile
