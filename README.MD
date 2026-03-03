@@ -1,6 +1,6 @@
 # Multi-tenant WhatsApp Library for AI Agents
 
-Powered by **Baileys** and designed for **AI Agent** orchestrations.
+Powered by **WEBLIFETECH** and designed for **AI Agent** orchestrations por @jonnathanypg.
 
 ## 👨‍💻 Author and Creator
 
