@@ -19,33 +19,77 @@ Powered by **WEBLIFETECH** and designed for **AI Agent** orchestrations por @jon
 - **Persistence**: MySQL support for session management.
 - **Microservice & Library**: Can be run as a standalone service or imported as a library.
 
+## 🏗 Architecture (Gateway Pattern)
+
+This library is designed to work as a **WhatsApp Gateway**. It handles the complex WhatsApp socket connection and provides a simple HTTP interface for your AI backends (Python, Go, PHP, etc.).
+
+```mermaid
+graph LR
+    User((WhatsApp User)) <--> Gateway[Node.js Gateway<br/>@agenticnucleus]
+    Gateway -- Webhook POST --> Python[Python/FastAPI Backend]
+    Python -- HTTP API --> Gateway
+```
+
+### 1. Receiving Messages (Node -> Python)
+When a message arrives at the Gateway, it will perform a `POST` request to your `BACKEND_URL` (defined in `.env`).
+
+**Python (FastAPI) Example:**
+```python
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.post("/webhooks/whatsapp")
+async def handle_whatsapp(request: Request):
+    data = await request.json()
+    print(f"Message from {data['from']}: {data['message']}")
+    return {"status": "received"}
+```
+
+### 2. Sending Messages (Python -> Node)
+To send a message, your Python backend simply calls the Gateway's API.
+
+**Python Example:**
+```python
+import requests
+
+payload = {
+    "phone": "5491112345678",
+    "message": "Hello from Python!",
+    "companyId": "your_company_id" # Optional
+}
+
+response = requests.post("http://localhost:3001/lead", json=payload)
+print(response.json())
+```
+
+---
+
 ## 📦 Installation
 
 ```bash
 npm install @agenticnucleus/whatsapp-multitenant
 ```
 
-## 🛠 Usage (Library Mode)
+## 🛠 Usage Modes
 
+### Mode A: Standalone Gateway (Recommended for Python/Other)
+This is the fastest way. You don't even need to code in Node.js.
+
+1. Create a folder and a `.env` file with your MySQL and Backend URL.
+2. Run directly:
+```bash
+npx @agenticnucleus/whatsapp-multitenant
+```
+The gateway will start instantly on port 3001.
+
+### Mode B: Library Mode (Node.js Only)
+If you want to integrate it directly into your Node.js app:
 ```typescript
 import { BaileysTransporter } from '@agenticnucleus/whatsapp-multitenant';
 
 const transporter = new BaileysTransporter();
-transporter.initialize();
-
-transporter.on('message', (message) => {
-    console.log('Message received:', message);
-});
-```
-
-## 🌐 Usage (Microservice Mode)
-
-1. Clone the repository.
-2. Initialize environment variables: `cp .env.example .env`.
-3. Start the service:
-```bash
-npm install
-npm run dev
+await transporter.initialize();
 ```
 
 ## 🤝 Contributing
