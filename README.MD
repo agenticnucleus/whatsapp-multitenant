@@ -1,5 +1,12 @@
 # Multi-tenant WhatsApp Library for AI Agents
 
+<p align="center">
+  <img src="https://img.shields.io/github/stars/agenticnucleus/whatsapp-multitenant?style=for-the-badge&logo=github&color=gold" alt="GitHub Stars">
+</p>
+
+> [!TIP]
+> **¿Te gusta este proyecto?** ¡Regálanos una ⭐ en GitHub para apoyarnos y que más gente conozca la librería!
+
 Powered by **WEBLIFETECH** and designed for **AI Agent** orchestrations por @jonnathanypg.
 
 ## 👨‍💻 Author and Creator

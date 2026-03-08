@@ -1,6 +1,6 @@
 {
   "name": "@agenticnucleus/whatsapp-multitenant",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Librería open source para conexiones multitenant de WhatsApp para sistemas de Agentes de IA",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
