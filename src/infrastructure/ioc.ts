@@ -4,11 +4,8 @@ import pino from "pino";
 import { LeadCreate } from "../application/lead.create";
 import LeadCtrl from "./controller/lead.ctrl";
 import SessionCtrl from "./controller/session.ctrl";
-import MetaRepository from "./repositories/meta.repository";
 import MockRepository from "./repositories/mock.repository";
-import TwilioService from "./repositories/twilio.repository";
 import WsTransporter from "./repositories/ws.external";
-import { VenomTransporter } from "./repositories/venom.repository";
 import { BaileysTransporter } from "./repositories/baileys.repository";
 
 const container = new ContainerBuilder();
