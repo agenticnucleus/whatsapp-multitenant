@@ -6,18 +6,18 @@ class SessionCtrl {
 
     /**
      * POST /session/init
-     * Body: { companyId: string }
+     * Body: { companyId: string, forceNew?: boolean }
      * Initialize a new WhatsApp session for a company.
      */
     public initSession = async (req: Request, res: Response) => {
         try {
-            const { companyId } = req.body;
+            const { companyId, forceNew } = req.body;
 
             if (!companyId) {
                 return res.status(400).json({ error: "companyId is required" });
             }
 
-            const result = await this.transporter.startSession(companyId);
+            const result = await this.transporter.startSession(companyId, Boolean(forceNew));
             res.json(result);
         } catch (error: any) {
             console.error("Init session error:", error);
@@ -58,8 +58,7 @@ class SessionCtrl {
 
     /**
      * GET /session/status/:companyId
-     * Returns the session status for the specified company.
-     * Auto-restores session from MySQL if credentials exist but session is not in memory.
+     * Returns the session status for the specified company from memory.
      */
     public getStatus = async (req: Request, res: Response) => {
         try {
@@ -69,12 +68,32 @@ class SessionCtrl {
                 return res.status(400).json({ error: "companyId is required" });
             }
 
-            // Try to auto-restore session if not in memory
-            const status = await this.transporter.getStatusWithAutoRestore(companyId);
+            const status = this.transporter.getStatus(companyId);
             res.json({ companyId, ...status });
         } catch (error: any) {
             console.error("Get status error:", error);
             res.status(500).json({ error: error.message || "Failed to get status" });
+        }
+    };
+
+    /**
+     * GET /session/status-restore/:companyId
+     * Returns the session status for the specified company.
+     * Auto-restores session from DB if credentials exist but session is not in memory.
+     */
+    public getStatusWithRestore = async (req: Request, res: Response) => {
+        try {
+            const { companyId } = req.params;
+
+            if (!companyId) {
+                return res.status(400).json({ error: "companyId is required" });
+            }
+
+            const status = await this.transporter.getStatusWithAutoRestore(companyId);
+            res.json({ companyId, ...status });
+        } catch (error: any) {
+            console.error("Get status restore error:", error);
+            res.status(500).json({ error: error.message || "Failed to get status restore" });
         }
     };
 

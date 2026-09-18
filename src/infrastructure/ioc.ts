@@ -1,6 +1,7 @@
 import { ContainerBuilder } from "node-dependency-injection";
 import * as Baileys from "@whiskeysockets/baileys";
 import pino from "pino";
+import axios from "axios";
 import { LeadCreate } from "../application/lead.create";
 import LeadCtrl from "./controller/lead.ctrl";
 import SessionCtrl from "./controller/session.ctrl";
@@ -15,11 +16,10 @@ const container = new ContainerBuilder();
  */
 container.register("ws.transporter", BaileysTransporter);
 const wsTransporter = container.get<BaileysTransporter>("ws.transporter");
-// Auto-initialize sessions
+// Auto-initialize sessions from DB on startup
 wsTransporter.initialize();
 
-// Listen for incoming messages and send to Python backend
-import axios from "axios";
+// Listen for incoming messages and forward to backend webhook
 wsTransporter.on("message", async (data) => {
   try {
     const key = data.message.key;
@@ -28,18 +28,21 @@ wsTransporter.on("message", async (data) => {
     }
 
     console.log("!! [DEBUG] MSG RECEIVED IN NODE !!", JSON.stringify(key));
-    // Determine backend URL (default to localhost:5000 for Python Flask)
+    // Determine backend URL (default to localhost:5000 for Python/AI Agent backend)
     const backendUrl = process.env.BACKEND_URL || "http://127.0.0.1:5000";
-    console.log(`[${data.companyId}] Forwarding message to backend: ${backendUrl}/webhooks/whatsapp`);
+    const webhookPath = process.env.WEBHOOK_PATH || "/webhooks/whatsapp";
+    const targetUrl = `${backendUrl.replace(/\/$/, '')}${webhookPath.startsWith('/') ? webhookPath : `/${webhookPath}`}`;
+    console.log(`[${data.companyId}] Forwarding message to backend: ${targetUrl}`);
 
-    // Extract content for Python backend (Simple Adapter Pattern)
+    // Extract content for Backend
     const msgContent = data.message.message;
     if (!msgContent) return;
 
     const textBody = msgContent.conversation || msgContent.extendedTextMessage?.text || "";
+    
     // Fix for LID addressing: logic to prefer phone number over LID
     let fromJid = key.remoteJid;
-    const keyAny = key as any; // Cast to access custom/undocumented properties seen in logs
+    const keyAny = key as any;
     if (keyAny.remoteJidAlt && fromJid?.endsWith("@lid")) {
       fromJid = keyAny.remoteJidAlt;
       console.log(`[${data.companyId}] Swapped LID for Phone Number: ${key.remoteJid} -> ${fromJid}`);
@@ -47,19 +50,23 @@ wsTransporter.on("message", async (data) => {
 
     const fromPhone = fromJid?.split('@')[0] || "";
 
-    // Detect document/media attachments
+    // Detect document, image, audio attachments
     let attachment: any = null;
     const docMsg = msgContent.documentMessage || msgContent.documentWithCaptionMessage?.message?.documentMessage;
-    if (docMsg) {
-      attachment = {
-        type: 'document',
-        mimetype: docMsg.mimetype || 'application/octet-stream',
-        filename: docMsg.fileName || docMsg.title || 'document',
-        caption: docMsg.caption || msgContent.documentWithCaptionMessage?.message?.documentMessage?.caption || '',
-      };
-      console.log(`[${data.companyId}] Document attachment detected: ${attachment.filename} (${attachment.mimetype})`);
+    const imgMsg = msgContent.imageMessage;
+    const audioMsg = msgContent.audioMessage;
 
-      // Download and save the document for backend processing
+    if (docMsg || imgMsg || audioMsg) {
+      const targetMsg = docMsg || imgMsg || audioMsg;
+      attachment = {
+        type: docMsg ? 'document' : (imgMsg ? 'image' : 'audio'),
+        mimetype: targetMsg.mimetype || (docMsg ? 'application/octet-stream' : (imgMsg ? 'image/jpeg' : 'audio/ogg; codecs=opus')),
+        filename: targetMsg.fileName || targetMsg.title || (docMsg ? 'document' : (imgMsg ? 'image.jpg' : `wa_audio_${Date.now()}.ogg`)),
+        caption: targetMsg.caption || msgContent.documentWithCaptionMessage?.message?.documentMessage?.caption || '',
+      };
+      console.log(`[${data.companyId}] ${attachment.type} attachment detected: ${attachment.filename}`);
+
+      // Download and save attachment for backend processing
       try {
         const stream = await Baileys.downloadMediaMessage(
           data.message,
@@ -75,14 +82,16 @@ wsTransporter.on("message", async (data) => {
           if (!fs.default.existsSync(tmpDir)) {
             fs.default.mkdirSync(tmpDir, { recursive: true });
           }
-          const safeName = `${Date.now()}_${attachment.filename.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+          const safeName = (docMsg || imgMsg)
+            ? `${Date.now()}_${attachment.filename.replace(/[^a-zA-Z0-9_.-]/g, '_')}`
+            : attachment.filename;
           const filePath = path.default.join(tmpDir, safeName);
           fs.default.writeFileSync(filePath, stream as Buffer);
           attachment.local_path = filePath;
-          console.log(`[${data.companyId}] Document saved to: ${filePath}`);
+          console.log(`[${data.companyId}] Attachment saved to: ${filePath}`);
         }
       } catch (dlErr: any) {
-        console.error(`[${data.companyId}] Failed to download document: ${dlErr.message}`);
+        console.error(`[${data.companyId}] Failed to download attachment: ${dlErr.message}`);
       }
     }
 
@@ -92,33 +101,32 @@ wsTransporter.on("message", async (data) => {
     const payload: any = {
       companyId: data.companyId,
       from: fromPhone,
+      fromJid: key.remoteJid,
+      remoteJid: key.remoteJid,
+      remoteJidAlt: keyAny.remoteJidAlt,
+      fromName: data.message.pushName || "",
       message: textBody || (attachment ? `[Archivo enviado: ${attachment.filename}]` : ''),
       messageId: key.id,
+      rawMessage: data.message,
     };
 
-    // Attach document metadata if present
     if (attachment) {
       payload.attachment = attachment;
     }
 
     try {
-      await axios.post(`${backendUrl}/webhooks/whatsapp`, payload);
-      // console.log(`[${data.companyId}] Webhook request sent successfully`);
+      await axios.post(targetUrl, payload);
     } catch (axiosError: any) {
       if (axiosError.response) {
         console.error(`[${data.companyId}] Webhook server responded with status:`, axiosError.response.status);
-        console.error(`[${data.companyId}] Response data:`, axiosError.response.data);
-      } else if (axiosError.request) {
-        console.error(`[${data.companyId}] No response received from webhook server:`, axiosError.message);
       } else {
         console.error(`[${data.companyId}] Webhook error:`, axiosError.message);
       }
     }
   } catch (error: any) {
-    console.error("Failed to process message:", error.message);
+    console.error("Failed to process incoming message:", error.message);
   }
 });
-
 
 container.register("db.repository", MockRepository);
 const dbRepository = container.get("db.repository");
@@ -137,4 +145,3 @@ container.register("lead.ctrl", LeadCtrl).addArgument(leadCreator);
 container.register("session.ctrl", SessionCtrl).addArgument(wsTransporter);
 
 export default container;
-

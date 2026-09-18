@@ -9,5 +9,6 @@ const router: Router = Router();
 const leadCtrl: LeadCtrl = container.get("lead.ctrl");
 router.post("/", leadCtrl.sendCtrl);
 router.post("/typing", leadCtrl.sendTypingCtrl);
+router.post("/media", leadCtrl.sendMediaCtrl);
 
 export { router };

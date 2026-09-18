@@ -1,7 +1,7 @@
 {
   "name": "@agenticnucleus/whatsapp-multitenant",
-  "version": "1.0.5",
-  "description": "Librería open source para conexiones multitenant de WhatsApp para sistemas de Agentes de IA",
+  "version": "1.1.0",
+  "description": "Librería y gateway open source para conexiones multitenant de WhatsApp para sistemas de Agentes de IA",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -35,8 +35,7 @@
     "pino": "^9.4.0",
     "qr-image": "^3.2.0",
     "ts-node": "^10.9.1",
-    "uuid": "^8.3.2",
-    "whatsapp-web.js": "^1.19.4"
+    "uuid": "^8.3.2"
   },
   "devDependencies": {
     "@types/axios": "^0.14.0",

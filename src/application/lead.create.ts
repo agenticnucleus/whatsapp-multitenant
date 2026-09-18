@@ -19,8 +19,8 @@ export class LeadCreate {
     phone: string;
     companyId: string;
   }) {
-    const responseDbSave = await this.leadRepository.save({ message, phone }); //TODO DB
-    const responseExSave = await this.leadExternal.sendMsg({ message, phone, companyId }); //TODO enviar a ws
+    const responseDbSave = await this.leadRepository.save({ message, phone });
+    const responseExSave = await this.leadExternal.sendMsg({ message, phone, companyId });
     return { responseDbSave, responseExSave };
   }
 
@@ -30,5 +30,11 @@ export class LeadCreate {
     }
     return { status: "not_supported" };
   }
-}
 
+  public async sendMedia(data: { companyId: string; phone: string; mediaUrl: string; mediaType: "image" | "video" | "audio" | "document"; caption?: string; fileName?: string }) {
+    if (this.leadExternal.sendMedia) {
+      return await this.leadExternal.sendMedia(data);
+    }
+    return { status: "not_supported" };
+  }
+}

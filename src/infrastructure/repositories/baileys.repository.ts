@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 import LeadExternal from "../../domain/lead-external.repository";
+import { useMySQLAuthState, clearSessionMemoryCache, deleteSessionAuth } from "../auth/mysql.auth";
 
 interface SessionInfo {
   socket: Baileys.WASocket;
@@ -21,6 +22,7 @@ interface SessionInfo {
 export class BaileysTransporter extends EventEmitter implements LeadExternal {
   private sessions: Map<string, SessionInfo> = new Map();
   private retryCount405: Map<string, number> = new Map();
+  private jidCache: Map<string, string> = new Map();
   private baileys: typeof Baileys;
 
   constructor(baileys: typeof Baileys = Baileys) {
@@ -42,7 +44,6 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
 
   private async getAuth(companyId: string): Promise<any> {
     try {
-      const { useMySQLAuthState } = await import("../auth/mysql.auth");
       return await useMySQLAuthState(companyId);
     } catch (error) {
       console.error(`[${companyId}] Auth error:`, error);
@@ -79,21 +80,55 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
 
   /**
    * Start or restart a session for a given company.
+   * If forceNew is true, wipes old credentials and forces a fresh QR generation.
    */
-  async startSession(companyId: string): Promise<{ status: string; message: string }> {
-    // If session exists and is open, return early
+  async startSession(companyId: string, forceNew = false): Promise<{ status: string; message: string }> {
+    // If session exists and is open and not forcing new, return early
     const existingSession = this.sessions.get(companyId);
-    if (existingSession && existingSession.state.connection === "open") {
+    if (!forceNew && existingSession && existingSession.state.connection === "open") {
       return { status: "connected", message: "Session already connected" };
+    }
+
+    if (forceNew) {
+      console.log(`[${companyId}] Force starting fresh session (wiping old credentials)...`);
+      if (existingSession?.socket) {
+        try {
+          existingSession.socket.end(new Error("Force restart requested"));
+        } catch (e) { }
+      }
+      this.sessions.delete(companyId);
+      await deleteSessionAuth(companyId);
+      if (fs.existsSync(this.getQrFile(companyId))) {
+        try { fs.unlinkSync(this.getQrFile(companyId)); } catch (e) { }
+      }
     }
 
     try {
       const { saveCreds, state } = await this.getAuth(companyId);
 
+      let waVersion: [number, number, number] | undefined = undefined;
+      try {
+        const fetchVersion = (Baileys as any).fetchLatestBaileysVersion || (Baileys as any).fetchLatestWaWebVersion;
+        if (typeof fetchVersion === "function") {
+          const vInfo = await fetchVersion();
+          if (vInfo && Array.isArray(vInfo.version)) {
+            waVersion = vInfo.version as [number, number, number];
+            console.log(`[${companyId}] Using latest WhatsApp Web version: ${waVersion.join('.')}`);
+          }
+        }
+      } catch (verErr) {
+        console.warn(`[${companyId}] Could not fetch latest WA version, using default:`, verErr);
+      }
+
       const socket = this.baileys.makeWASocket({
         printQRInTerminal: false,
-        browser: ["KindiCoreAI", "Chrome", "1.0.0"],
-        version: [2, 3000, 1033893291],
+        browser: (Baileys as any).Browsers ? (Baileys as any).Browsers.ubuntu("Chrome") : ["Ubuntu", "Chrome", "22.04.4"],
+        ...(waVersion ? { version: waVersion } : {}),
+        syncFullHistory: false, // Prevents downloading massive history and flooding DB queries
+        markOnlineOnConnect: true,
+        keepAliveIntervalMs: 25000,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
         //@ts-ignore
         logger: pino({ level: "silent" }),
         auth: state,
@@ -109,7 +144,7 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
 
       socket.ev.on("creds.update", saveCreds);
 
-      socket.ev.on("connection.update", (update: any) => {
+      socket.ev.on("connection.update", async (update: any) => {
         const { connection, qr: qrCode, lastDisconnect } = update;
         // CRITICAL FIX: Merge state updates, do not overwrite! 
         // Baileys emits partial updates (e.g., { receivedPendingNotifications: true }).
@@ -125,7 +160,7 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
           // Save QR to file as requested
           try {
             fs.writeFileSync(this.getQrFile(companyId), svgString);
-            console.log(`[${companyId}] QR code saved to ${this.getQrFile(companyId)}`);
+            console.log(`[${companyId}] QR code generated and saved to ${this.getQrFile(companyId)}`);
           } catch (err) {
             console.error(`[${companyId}] Error saving QR file:`, err);
           }
@@ -144,17 +179,17 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
           }
 
           this.emit("connected", { companyId });
-          console.log(`[${companyId}] Connection opened`);
+          console.log(`[${companyId}] Connection opened successfully!`);
         }
 
         if (connection === "close") {
           sessionInfo.isReady = false;
 
           const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-          const shouldReconnect = statusCode !== Baileys.DisconnectReason.loggedOut && statusCode !== 405;
-          // 405 is Connection Failure, often requires a clean start
+          const isLoggedOut = statusCode === Baileys.DisconnectReason.loggedOut || statusCode === 401;
+          const shouldReconnect = !isLoggedOut && statusCode !== 405;
 
-          console.log(`[${companyId}] Connection closed. Reason: ${statusCode}, Error: ${lastDisconnect?.error}`);
+          console.log(`[${companyId}] Connection closed. Reason: ${statusCode}, isLoggedOut: ${isLoggedOut}, Error: ${lastDisconnect?.error}`);
 
           if (statusCode === 405) {
             const retries = (this.retryCount405.get(companyId) || 0) + 1;
@@ -184,13 +219,12 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
               this.startSession(companyId);
             }, 3000);
           } else {
-            console.log(`[${companyId}] Session logged out or permanently disconnected`);
+            console.log(`[${companyId}] Session logged out or permanently disconnected. Wiping old credentials...`);
             this.sessions.delete(companyId);
+            await deleteSessionAuth(companyId);
             this.emit("disconnected", { companyId, reason: "logged_out" });
 
-            // Cleanup on logout
             try {
-              // fs.rmSync... (Deprecated with MySQL)
               if (fs.existsSync(this.getQrFile(companyId))) fs.unlinkSync(this.getQrFile(companyId));
             } catch (e) { }
           }
@@ -204,6 +238,15 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
           for (const msg of m.messages) {
             console.log(`[${companyId}] Processing message key:`, msg.key);
             if (!msg.key.fromMe) {
+              if (msg.key.remoteJid) {
+                const rJid = msg.key.remoteJid;
+                const digits = rJid.split('@')[0].replace(/[^0-9]/g, "");
+                if (digits) {
+                  this.jidCache.set(`${companyId}:${digits}`, rJid);
+                  this.jidCache.set(digits, rJid);
+                  console.log(`[${companyId}] Cached sender JID: ${digits} -> ${rJid}`);
+                }
+              }
               console.log(`[${companyId}] Emitting message event to IoC...`);
               this.emit("message", { companyId, message: msg });
             } else {
@@ -242,18 +285,25 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
   }
 
   /**
-   * Get session status for a company.
+   * Get session status for a company including live connected phone number.
    */
-  getStatus(companyId: string): { connected: boolean; state: string | null; status: string | null } {
+  getStatus(companyId: string): { connected: boolean; state: string | null; status: string | null; phone: string | null } {
     const session = this.sessions.get(companyId);
     if (!session) {
-      return { connected: false, state: null, status: null };
+      return { connected: false, state: null, status: null, phone: null };
     }
     const connectionState = session.state.connection || null;
+    const isConnected = connectionState === "open";
+    let phone: string | null = null;
+    if (isConnected && session.socket?.user) {
+      const rawUser = session.socket.user.id || "";
+      phone = rawUser.split(":")[0].split("@")[0] || null;
+    }
     return {
-      connected: connectionState === "open",
+      connected: isConnected,
       state: connectionState,
-      status: connectionState, // Alias for Python backend compatibility
+      status: connectionState, // Alias for backend compatibility
+      phone,
     };
   }
 
@@ -261,25 +311,33 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
    * Get session status with auto-restore from MySQL.
    * If session is not in memory but credentials exist in MySQL, auto-start the session.
    */
-  async getStatusWithAutoRestore(companyId: string): Promise<{ connected: boolean; state: string | null; status: string | null; restoring?: boolean }> {
+  async getStatusWithAutoRestore(companyId: string): Promise<{ connected: boolean; state: string | null; status: string | null; phone: string | null; restoring?: boolean }> {
     // Check if session exists in memory
     const existingSession = this.sessions.get(companyId);
     if (existingSession) {
       const connectionState = existingSession.state.connection || null;
+      const isConnected = connectionState === "open";
+      let phone: string | null = null;
+      if (isConnected && existingSession.socket?.user) {
+        const rawUser = existingSession.socket.user.id || "";
+        phone = rawUser.split(":")[0].split("@")[0] || null;
+      }
       return {
-        connected: connectionState === "open",
+        connected: isConnected,
         state: connectionState,
         status: connectionState,
+        phone,
       };
     }
 
     // Session not in memory - check if credentials exist in MySQL
     try {
-      const { useMySQLAuthState } = await import("../auth/mysql.auth");
       const { state } = await useMySQLAuthState(companyId);
 
       // Check if credentials have been paired (me.id exists means device was paired)
       if (state.creds && state.creds.me && state.creds.me.id) {
+        const rawUser = state.creds.me.id || "";
+        const savedPhone = rawUser.split(":")[0].split("@")[0] || null;
         // Auto-start session in background (don't wait for it)
         console.log(`[${companyId}] Auto-restoring session from MySQL...`);
         this.startSession(companyId).catch(err => {
@@ -290,6 +348,7 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
           connected: false,
           state: "restoring",
           status: "restoring",
+          phone: savedPhone,
           restoring: true,
         };
       }
@@ -297,8 +356,7 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
       console.error(`[${companyId}] Error checking stored credentials:`, error);
     }
 
-    // No credentials or not registered
-    return { connected: false, state: null, status: null };
+    return { connected: false, state: null, status: null, phone: null };
   }
 
   /**
@@ -306,17 +364,103 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
    */
   async logout(companyId: string): Promise<{ status: string }> {
     const session = this.sessions.get(companyId);
-    if (!session) {
-      return { status: "not_found" };
+    if (session?.socket) {
+      try {
+        await session.socket.logout();
+      } catch (error) {
+        console.warn(`[${companyId}] Socket logout warning:`, error);
+      }
     }
-    try {
-      await session.socket.logout();
-      this.sessions.delete(companyId);
-      return { status: "logged_out" };
-    } catch (error) {
-      console.error(`[${companyId}] Logout error:`, error);
-      return { status: "error" };
+    this.sessions.delete(companyId);
+    await deleteSessionAuth(companyId);
+    if (fs.existsSync(this.getQrFile(companyId))) {
+      try { fs.unlinkSync(this.getQrFile(companyId)); } catch (e) { }
     }
+    return { status: "logged_out" };
+  }
+
+  private normalizePhone(phone: string): string {
+    let clean = (phone || "").replace(/[^0-9]/g, "");
+    // If entered with leading 0 and exactly 10 digits (e.g. local 09xxxxxxxx in Ecuador)
+    if (clean.startsWith("0") && clean.length === 10) {
+      clean = "593" + clean.substring(1);
+    }
+    // Any other number (e.g. 1xxxxxxxxxx US/CA, 52xxxxxxxxxx Mexico, 34xxxxxxxxx Spain, 593xxxxxxxxx Ecuador, 57xxxxxxxxxx Colombia)
+    // is preserved directly with its international country code.
+    return clean;
+  }
+
+  private async getOrRestoreSession(companyId: string): Promise<SessionInfo | null> {
+    let session = this.sessions.get(companyId);
+    if (session?.socket && (session.isReady || session.state?.connection === "open")) {
+      return session;
+    }
+
+    // Check if another active session exists in memory (e.g. "1" or "default")
+    if (this.sessions.size > 0) {
+      for (const [sId, sInfo] of this.sessions.entries()) {
+        if (sInfo.socket && (sInfo.isReady || sInfo.state?.connection === "open")) {
+          console.log(`[${companyId}] Found active session under id '${sId}', reusing it.`);
+          return sInfo;
+        }
+      }
+    }
+
+    // Try auto-restoring from MySQL
+    console.log(`[${companyId}] Auto-restoring session from MySQL for messaging...`);
+    await this.getStatusWithAutoRestore(companyId);
+
+    // Wait up to 3 seconds for socket initialization
+    for (let i = 0; i < 6; i++) {
+      session = this.sessions.get(companyId);
+      if (session?.socket && (session.isReady || session.state?.connection === "open")) {
+        return session;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    return this.sessions.get(companyId) || null;
+  }
+
+  private resolveJid(phone: string, companyId?: string): string {
+    const trimmed = (phone || "").trim();
+    if (trimmed.includes("@lid") || trimmed.includes("@s.whatsapp.net")) {
+      return trimmed;
+    }
+
+    const digitsOnly = trimmed.replace(/[^0-9]/g, "");
+
+    // 1. Check in-memory JID cache for this company or global
+    if (companyId && this.jidCache.has(`${companyId}:${digitsOnly}`)) {
+      const cached = this.jidCache.get(`${companyId}:${digitsOnly}`)!;
+      console.log(`[${companyId}] Resolved JID from cache: ${cached}`);
+      return cached;
+    }
+    if (this.jidCache.has(digitsOnly)) {
+      const cached = this.jidCache.get(digitsOnly)!;
+      console.log(`Resolved JID from global cache: ${cached}`);
+      return cached;
+    }
+
+    // 2. Multi-device LID heuristic:
+    // LIDs in WhatsApp are 13 to 16 digits (or longer) and do not match standard country phone numbers.
+    const isStandardPhone = 
+      (digitsOnly.startsWith("593") && digitsOnly.length <= 12) ||
+      (digitsOnly.startsWith("52") && digitsOnly.length <= 12) ||
+      (digitsOnly.startsWith("57") && digitsOnly.length <= 12) ||
+      (digitsOnly.startsWith("34") && digitsOnly.length <= 11) ||
+      (digitsOnly.startsWith("1") && digitsOnly.length <= 11) ||
+      (digitsOnly.startsWith("51") && digitsOnly.length <= 11) ||
+      (digitsOnly.startsWith("56") && digitsOnly.length <= 11) ||
+      (digitsOnly.startsWith("549") && digitsOnly.length <= 13);
+
+    const isLid = (digitsOnly.length >= 13 && !isStandardPhone) || digitsOnly.length >= 14;
+    if (isLid) {
+      return `${digitsOnly}@lid`;
+    }
+
+    const cleanPhone = this.normalizePhone(trimmed);
+    return `${cleanPhone}@s.whatsapp.net`;
   }
 
   /**
@@ -331,20 +475,17 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
     phone: string;
     companyId?: string;
   }): Promise<any> {
-    const targetCompanyId = companyId || "default";
+    const targetCompanyId = companyId || "1";
     console.log(`[${targetCompanyId}] Sending message to ${phone}: ${message}`);
-    const session = this.sessions.get(targetCompanyId);
-    console.log(`[${targetCompanyId}] Connection status: ${session?.state?.connection}`);
+    const session = await this.getOrRestoreSession(targetCompanyId);
 
-    // Relaxed check: Allow sending if session exists, even if state is not explicitly "open" (sometimes it lags)
-    if (!session) {
-      throw new Error(`Session for ${targetCompanyId} not found`);
+    if (!session || !session.socket) {
+      throw new Error(`Session for ${targetCompanyId} not found or not connected. Please scan QR in channels.`);
     }
 
     try {
-      // Normalize phone number (remove any non-numeric except +)
-      const cleanPhone = phone.replace(/[^0-9]/g, "");
-      const jid = `${cleanPhone}@s.whatsapp.net`;
+      const jid = this.resolveJid(phone, targetCompanyId);
+      console.log(`[${targetCompanyId}] Resolved JID for send: ${jid}`);
 
       const response = await session.socket.sendMessage(jid, { text: message });
       return response;
@@ -372,15 +513,16 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
     caption?: string;
     fileName?: string;
   }): Promise<any> {
-    const session = this.sessions.get(companyId);
+    const targetCompanyId = companyId || "1";
+    const session = await this.getOrRestoreSession(targetCompanyId);
 
-    if (!session || session.state.connection !== "open") {
-      throw new Error(`Session for ${companyId} is not connected`);
+    if (!session || !session.socket) {
+      throw new Error(`Session for ${targetCompanyId} is not connected`);
     }
 
     try {
-      const cleanPhone = phone.replace(/[^0-9]/g, "");
-      const jid = `${cleanPhone}@s.whatsapp.net`;
+      const jid = this.resolveJid(phone, targetCompanyId);
+      console.log(`[${targetCompanyId}] Resolved JID for sendMedia: ${jid}`);
 
       let messageContent: any = {};
 
@@ -392,13 +534,19 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
           messageContent = { video: { url: mediaUrl }, caption };
           break;
         case "audio":
-          messageContent = { audio: { url: mediaUrl }, mimetype: "audio/mpeg" };
+          messageContent = { audio: { url: mediaUrl }, mimetype: "audio/mp4", ptt: true };
           break;
         case "document":
+          let mime = "application/pdf";
+          if (fileName?.endsWith(".xlsx") || fileName?.endsWith(".xls")) {
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+          } else if (fileName?.endsWith(".csv")) {
+            mime = "text/csv";
+          }
           messageContent = {
             document: { url: mediaUrl },
-            fileName: fileName || "document",
-            mimetype: "application/octet-stream",
+            fileName: fileName || "documento.pdf",
+            mimetype: mime,
           };
           break;
       }
@@ -406,14 +554,11 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
       const response = await session.socket.sendMessage(jid, messageContent);
       return response;
     } catch (error) {
-      console.error(`[${companyId}] Send media error:`, error);
+      console.error(`[${targetCompanyId}] Send media error:`, error);
       throw error;
     }
   }
 
-  /**
-   * Get all active sessions info.
-   */
   /**
    * Send typing indicator
    */
@@ -422,13 +567,11 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
     const session = this.sessions.get(targetCompanyId);
 
     if (!session || !session.isReady) {
-      // Silent fail or return status
       return { status: "not_connected" };
     }
 
     try {
-      const cleanPhone = phone.replace(/[^0-9]/g, "");
-      const jid = `${cleanPhone}@s.whatsapp.net`;
+      const jid = this.resolveJid(phone, targetCompanyId);
       await session.socket.sendPresenceUpdate('composing', jid);
       return { status: 'success' };
     } catch (error) {
@@ -437,6 +580,9 @@ export class BaileysTransporter extends EventEmitter implements LeadExternal {
     }
   }
 
+  /**
+   * Get all active sessions info.
+   */
   getAllSessions(): { companyId: string; connected: boolean }[] {
     const result: { companyId: string; connected: boolean }[] = [];
     this.sessions.forEach((session, companyId) => {

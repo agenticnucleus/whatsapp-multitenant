@@ -11,7 +11,7 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    // Keep-alive settings to prevent ECONNRESET on remote MySQL
+    connectTimeout: 30000, // 30 seconds to handle remote network latency
     enableKeepAlive: true,
     keepAliveInitialDelay: 10000, // 10 seconds
     idleTimeout: 60000, // 60 seconds idle before closing

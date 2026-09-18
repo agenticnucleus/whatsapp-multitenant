@@ -35,7 +35,18 @@ class LeadCtrl {
       res.status(500).json({ error: e.message });
     }
   };
+
+  public sendMediaCtrl = async ({ body }: Request, res: Response) => {
+    try {
+      const { phone, companyId, mediaUrl, mediaType, caption, fileName } = body;
+      if (!companyId || !phone || !mediaUrl || !mediaType) return res.status(400).json({ error: "missing data" });
+
+      await this.leadCreator.sendMedia({ phone, companyId, mediaUrl, mediaType, caption, fileName });
+      res.json({ status: "ok" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  };
 }
 
 export default LeadCtrl;
-
