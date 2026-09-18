@@ -97,6 +97,6 @@
     "src/types/baileys.d.ts"
   ],
   "include": [
-    "**/*"
+    "src/**/*"
   ]
 }

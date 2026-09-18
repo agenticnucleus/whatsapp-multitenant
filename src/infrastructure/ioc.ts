@@ -6,7 +6,6 @@ import { LeadCreate } from "../application/lead.create";
 import LeadCtrl from "./controller/lead.ctrl";
 import SessionCtrl from "./controller/session.ctrl";
 import MockRepository from "./repositories/mock.repository";
-import WsTransporter from "./repositories/ws.external";
 import { BaileysTransporter } from "./repositories/baileys.repository";
 
 const container = new ContainerBuilder();
